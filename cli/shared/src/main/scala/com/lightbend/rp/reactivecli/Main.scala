@@ -20,7 +20,7 @@ import com.lightbend.rp.reactivecli.argparse.kubernetes.KubernetesArgs
 import com.lightbend.rp.reactivecli.argparse.marathon.MarathonArgs
 import com.lightbend.rp.reactivecli.argparse.{ GenerateDeploymentArgs, InputArgs, VersionArgs }
 import com.lightbend.rp.reactivecli.concurrent._
-import com.lightbend.rp.reactivecli.docker.{ Config, DockerCredentials, DockerEngine, DockerRegistry }
+import com.lightbend.rp.reactivecli.docker.{ Config, CmdConfig, DockerCredentials, DockerEngine, DockerRegistry }
 import com.lightbend.rp.reactivecli.process.jq
 import com.lightbend.rp.reactivecli.runtime.kubernetes
 import com.lightbend.rp.reactivecli.runtime.marathon
@@ -191,6 +191,13 @@ object Main extends LazyLogging {
                   }
                 }
 
+                def getDockerCmdConfig(imageName: String): Future[Option[Config]] =
+                  Platform.processExec(Seq("docker", "inspect", imageName)).map {
+                    case (_, json) =>
+                      import _root_.argonaut.Argonaut._
+                      json.decodeOption[List[CmdConfig]].flatMap(_.headOption.map(_.registryConfig))
+                  }
+
                 def getDockerHostConfig(imageName: String): Future[Option[Config]] = {
                   implicit val httpSettingsWithDockerCredentials: HttpSettings = DockerEngine.applyDockerHostSettings(httpSettings, environment)
                   val http = Http.http(httpSettingsWithDockerCredentials)
@@ -216,14 +223,10 @@ object Main extends LazyLogging {
                     sbtConfig fallbackTo mavenConfig
                   }
 
-                  for {
-                    maybeConfig <- getDockerHostConfig(imageName)
-                    config <- maybeConfig match {
-                      case None => getDockerRegistryConfig(imageName)
-                      case Some(c) => Future.successful(c)
-                    }
-                    validConfig <- validateConfig(config)
-                  } yield validConfig
+                  getDockerCmdConfig(imageName).flatMap(_.map(Future.successful).getOrElse(
+                    getDockerHostConfig(imageName).flatMap(_.map(Future.successful).getOrElse(
+                      getDockerRegistryConfig(imageName)))))
+                    .flatMap(validateConfig _)
                 }
 
                 def configFailure(img: String, t: Throwable) = {
